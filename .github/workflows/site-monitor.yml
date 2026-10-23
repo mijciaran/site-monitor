@@ -1,0 +1,57 @@
+name: Site integrity monitor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes (GitHub may run it a few minutes late)
+  workflow_dispatch: {}      # lets you run it by hand from the Actions tab
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: site-monitor
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run checks
+        run: python3 monitor/check_site.py
+
+      - name: Open, update or close the alert issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="SITE ALERT: myirishjeweler.com check failed"
+          gh label create site-alert --color B60205 --repo "$REPO" 2>/dev/null || true
+          OPEN=$(gh issue list --repo "$REPO" --label site-alert --state open --json number --jq '.[0].number')
+
+          if [ -f problems.txt ]; then
+            if [ -z "$OPEN" ]; then
+              {
+                echo "The site monitor found a problem at $(date -u '+%Y-%m-%d %H:%M UTC')."
+                echo
+                echo '```'
+                cat problems.txt
+                echo '```'
+                echo
+                echo "Check the site now. If a developer changed a file on purpose, update its hash in monitor/config.json and close this issue."
+                echo
+                echo "Run: $RUN_URL"
+              } > body.md
+              gh issue create --repo "$REPO" --title "$TITLE" --label site-alert --body-file body.md
+              # Fail this run too, so GitHub also sends a failed-workflow email.
+              exit 1
+            fi
+            echo "Alert issue #$OPEN is already open; not alerting again."
+          elif [ -n "$OPEN" ]; then
+            gh issue comment "$OPEN" --repo "$REPO" --body "All checks passing again at $(date -u '+%Y-%m-%d %H:%M UTC'). Closing. Run: $RUN_URL"
+            gh issue close "$OPEN" --repo "$REPO"
+          fi
